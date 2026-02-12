@@ -1,0 +1,30 @@
+{
+  "name": "organic-sales-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "db:ui": "node node_modules/sqlpad/server.js --dbPath ./data/sqlpad --port 8080 --admin admin@local --adminPassword admin123",
+    "db:sqlite-web": "python3 -m sqlite_web ./data/dev.db --port 8080 --host 127.0.0.1",
+    "seed": "node src/seed.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@prisma/client": "^7.3.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "prisma": "^7.3.0",
+    "sqlpad": "^3.1.0",
+    "sqlite-web": "^0.1.1-alpha.0",
+    "sqlite3": "^5.1.7"
+  }
+}
