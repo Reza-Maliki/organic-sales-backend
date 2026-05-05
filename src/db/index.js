@@ -3,6 +3,8 @@ const sqlite3 = require("sqlite3").verbose();
 const {randomUUID} = require("crypto");
 const {categories, products} = require("./seed-data");
 
+const DEFAULT_STOCK = 100;
+
 const dbFile = process.env.DATABASE_FILE || "./data/dev.db";
 const resolvedPath = path.resolve(__dirname, "..", "..", dbFile);
 const db = new sqlite3.Database(resolvedPath);
@@ -40,6 +42,20 @@ const initDb = async () => {
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'customer',
             created_at TEXT NOT NULL
+        )`
+    );
+    await run(
+        `CREATE TABLE IF NOT EXISTS addresses (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            recipient_name TEXT,
+            phone TEXT,
+            province TEXT,
+            city TEXT NOT NULL,
+            address_line TEXT NOT NULL,
+            postal_code TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )`
     );
     await run(
@@ -89,6 +105,13 @@ const initDb = async () => {
             user_id TEXT NOT NULL,
             status TEXT NOT NULL,
             total INTEGER NOT NULL,
+            address_id TEXT,
+            shipping_address TEXT,
+            tipax_tracking_code TEXT,
+            payment_provider TEXT,
+            payment_authority TEXT,
+            payment_ref_id TEXT,
+            payment_status TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )`
@@ -115,6 +138,36 @@ const initDb = async () => {
     const hasCategoryImage = categoryColumns.some((col) => col.name === "image_url");
     if (!hasCategoryImage) {
         await run("ALTER TABLE categories ADD COLUMN image_url TEXT");
+    }
+
+    const ordersColumns = await all("PRAGMA table_info(orders)");
+    const hasAddressId = ordersColumns.some((col) => col.name === "address_id");
+    if (!hasAddressId) {
+        await run("ALTER TABLE orders ADD COLUMN address_id TEXT");
+    }
+    const hasShippingAddress = ordersColumns.some((col) => col.name === "shipping_address");
+    if (!hasShippingAddress) {
+        await run("ALTER TABLE orders ADD COLUMN shipping_address TEXT");
+    }
+    const hasTipax = ordersColumns.some((col) => col.name === "tipax_tracking_code");
+    if (!hasTipax) {
+        await run("ALTER TABLE orders ADD COLUMN tipax_tracking_code TEXT");
+    }
+    const hasPaymentProvider = ordersColumns.some((col) => col.name === "payment_provider");
+    if (!hasPaymentProvider) {
+        await run("ALTER TABLE orders ADD COLUMN payment_provider TEXT");
+    }
+    const hasPaymentAuthority = ordersColumns.some((col) => col.name === "payment_authority");
+    if (!hasPaymentAuthority) {
+        await run("ALTER TABLE orders ADD COLUMN payment_authority TEXT");
+    }
+    const hasPaymentRef = ordersColumns.some((col) => col.name === "payment_ref_id");
+    if (!hasPaymentRef) {
+        await run("ALTER TABLE orders ADD COLUMN payment_ref_id TEXT");
+    }
+    const hasPaymentStatus = ordersColumns.some((col) => col.name === "payment_status");
+    if (!hasPaymentStatus) {
+        await run("ALTER TABLE orders ADD COLUMN payment_status TEXT");
     }
 
     const breakfastCategory = await get("SELECT id FROM categories WHERE slug = 'breakfast'");
@@ -161,13 +214,16 @@ const initDb = async () => {
                 product.slug,
                 product.description,
                 product.price,
-                product.stock,
+                DEFAULT_STOCK,
                 product.imageUrl,
                 category.id,
                 new Date().toISOString(),
             ]
         );
     }
+
+    // For now, treat inventory as 100 for all products (per current requirements).
+    await run("UPDATE products SET stock = ?", [DEFAULT_STOCK]);
 };
 
 module.exports = {db, run, get, all, initDb};

@@ -9,6 +9,8 @@ const productRoutes = require("./routes/products");
 const orderRoutes = require("./routes/orders");
 const favoriteRoutes = require("./routes/favorites");
 const passwordRoutes = require("./routes/password");
+const addressRoutes = require("./routes/addresses");
+const paymentRoutes = require("./routes/payments");
 
 const app = express();
 
@@ -25,6 +27,8 @@ app.use("/categories", categoryRoutes);
 app.use("/products", productRoutes);
 app.use("/orders", orderRoutes);
 app.use("/favorites", favoriteRoutes);
+app.use("/addresses", addressRoutes);
+app.use("/payments", paymentRoutes);
 
 const port = Number(process.env.PORT || 4000);
 
