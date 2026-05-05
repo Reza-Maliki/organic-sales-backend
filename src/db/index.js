@@ -1,5 +1,6 @@
 const path = require("path");
-const sqlite3 = require("sqlite3").verbose();
+const fs = require("fs");
+const Database = require("better-sqlite3");
 const {randomUUID} = require("crypto");
 const {categories, products} = require("./seed-data");
 
@@ -7,31 +8,28 @@ const DEFAULT_STOCK = 100;
 
 const dbFile = process.env.DATABASE_FILE || "./data/dev.db";
 const resolvedPath = path.resolve(__dirname, "..", "..", dbFile);
-const db = new sqlite3.Database(resolvedPath);
+fs.mkdirSync(path.dirname(resolvedPath), {recursive: true});
+const db = new Database(resolvedPath);
 
-const run = (sql, params = []) =>
-    new Promise((resolve, reject) => {
-        db.run(sql, params, function (err) {
-            if (err) return reject(err);
-            resolve(this);
-        });
-    });
+const normalizeParams = (params) => {
+    if (!params) return [];
+    return Array.isArray(params) ? params : [params];
+};
 
-const get = (sql, params = []) =>
-    new Promise((resolve, reject) => {
-        db.get(sql, params, (err, row) => {
-            if (err) return reject(err);
-            resolve(row);
-        });
-    });
+const run = async (sql, params = []) => {
+    const statement = db.prepare(sql);
+    return statement.run(normalizeParams(params));
+};
 
-const all = (sql, params = []) =>
-    new Promise((resolve, reject) => {
-        db.all(sql, params, (err, rows) => {
-            if (err) return reject(err);
-            resolve(rows);
-        });
-    });
+const get = async (sql, params = []) => {
+    const statement = db.prepare(sql);
+    return statement.get(normalizeParams(params));
+};
+
+const all = async (sql, params = []) => {
+    const statement = db.prepare(sql);
+    return statement.all(normalizeParams(params));
+};
 
 const initDb = async () => {
     await run(
