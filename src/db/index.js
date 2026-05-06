@@ -1,172 +1,166 @@
-const path = require("path");
-const fs = require("fs");
-const Database = require("better-sqlite3");
+const mysql = require("mysql2/promise");
 const {randomUUID} = require("crypto");
 const {categories, products} = require("./seed-data");
 
 const DEFAULT_STOCK = 100;
 
-const dbFile = process.env.DATABASE_FILE || "./data/dev.db";
-const resolvedPath = path.resolve(__dirname, "..", "..", dbFile);
-fs.mkdirSync(path.dirname(resolvedPath), {recursive: true});
-const db = new Database(resolvedPath);
+const pool = mysql.createPool({
+    host: process.env.MYSQL_HOST || "localhost",
+    port: Number(process.env.MYSQL_PORT || 3306),
+    user: process.env.MYSQL_USER,
+    password: process.env.MYSQL_PASSWORD,
+    database: process.env.MYSQL_DATABASE,
+    waitForConnections: true,
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 10),
+    namedPlaceholders: false,
+    timezone: "Z",
+});
 
-const normalizeParams = (params) => {
-    if (!params) return [];
-    return Array.isArray(params) ? params : [params];
+const execQuery = async (sql, params = [], connection = null) => {
+    const executor = connection || pool;
+    const [rows] = await executor.execute(sql, params);
+    return rows;
 };
 
-const run = async (sql, params = []) => {
-    const statement = db.prepare(sql);
-    return statement.run(normalizeParams(params));
+const run = async (sql, params = [], connection = null) => execQuery(sql, params, connection);
+
+const get = async (sql, params = [], connection = null) => {
+    const rows = await execQuery(sql, params, connection);
+    return Array.isArray(rows) ? rows[0] || null : rows || null;
 };
 
-const get = async (sql, params = []) => {
-    const statement = db.prepare(sql);
-    return statement.get(normalizeParams(params));
+const all = async (sql, params = [], connection = null) => {
+    const rows = await execQuery(sql, params, connection);
+    return Array.isArray(rows) ? rows : [];
 };
 
-const all = async (sql, params = []) => {
-    const statement = db.prepare(sql);
-    return statement.all(normalizeParams(params));
+const withTransaction = async (fn) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const result = await fn({
+            run: (sql, params = []) => run(sql, params, connection),
+            get: (sql, params = []) => get(sql, params, connection),
+            all: (sql, params = []) => all(sql, params, connection),
+        });
+        await connection.commit();
+        return result;
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch {
+            // ignore rollback errors
+        }
+        throw error;
+    } finally {
+        connection.release();
+    }
 };
 
 const initDb = async () => {
-    await run(
-        `CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            name TEXT,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'customer',
-            created_at TEXT NOT NULL
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS addresses (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            recipient_name TEXT,
-            phone TEXT,
-            province TEXT,
-            city TEXT NOT NULL,
-            address_line TEXT NOT NULL,
-            postal_code TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS favorites (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            product_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id),
-            FOREIGN KEY (product_id) REFERENCES products(id)
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS password_resets (
-            id TEXT PRIMARY KEY,
-            email TEXT NOT NULL,
-            code TEXT NOT NULL,
-            expires_at TEXT NOT NULL
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS categories (
-            id TEXT PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            slug TEXT UNIQUE NOT NULL,
-            image_url TEXT,
-            created_at TEXT NOT NULL
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS products (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            slug TEXT UNIQUE NOT NULL,
-            description TEXT,
-            price INTEGER NOT NULL,
-            stock INTEGER NOT NULL DEFAULT 0,
-            image_url TEXT,
-            category_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (category_id) REFERENCES categories(id)
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS orders (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            total INTEGER NOT NULL,
-            address_id TEXT,
-            shipping_address TEXT,
-            tipax_tracking_code TEXT,
-            payment_provider TEXT,
-            payment_authority TEXT,
-            payment_ref_id TEXT,
-            payment_status TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )`
-    );
-    await run(
-        `CREATE TABLE IF NOT EXISTS order_items (
-            id TEXT PRIMARY KEY,
-            order_id TEXT NOT NULL,
-            product_id TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            price INTEGER NOT NULL,
-            FOREIGN KEY (order_id) REFERENCES orders(id),
-            FOREIGN KEY (product_id) REFERENCES products(id)
-        )`
-    );
-
-    const userColumns = await all("PRAGMA table_info(users)");
-    const hasName = userColumns.some((col) => col.name === "name");
-    if (!hasName) {
-        await run("ALTER TABLE users ADD COLUMN name TEXT");
+    if (!process.env.MYSQL_USER || !process.env.MYSQL_DATABASE) {
+        throw new Error("MYSQL_USER and MYSQL_DATABASE are required");
     }
 
-    const categoryColumns = await all("PRAGMA table_info(categories)");
-    const hasCategoryImage = categoryColumns.some((col) => col.name === "image_url");
-    if (!hasCategoryImage) {
-        await run("ALTER TABLE categories ADD COLUMN image_url TEXT");
-    }
+    await run(`CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(36) PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        name VARCHAR(255) NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        role VARCHAR(32) NOT NULL DEFAULT 'customer',
+        created_at DATETIME NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
-    const ordersColumns = await all("PRAGMA table_info(orders)");
-    const hasAddressId = ordersColumns.some((col) => col.name === "address_id");
-    if (!hasAddressId) {
-        await run("ALTER TABLE orders ADD COLUMN address_id TEXT");
-    }
-    const hasShippingAddress = ordersColumns.some((col) => col.name === "shipping_address");
-    if (!hasShippingAddress) {
-        await run("ALTER TABLE orders ADD COLUMN shipping_address TEXT");
-    }
-    const hasTipax = ordersColumns.some((col) => col.name === "tipax_tracking_code");
-    if (!hasTipax) {
-        await run("ALTER TABLE orders ADD COLUMN tipax_tracking_code TEXT");
-    }
-    const hasPaymentProvider = ordersColumns.some((col) => col.name === "payment_provider");
-    if (!hasPaymentProvider) {
-        await run("ALTER TABLE orders ADD COLUMN payment_provider TEXT");
-    }
-    const hasPaymentAuthority = ordersColumns.some((col) => col.name === "payment_authority");
-    if (!hasPaymentAuthority) {
-        await run("ALTER TABLE orders ADD COLUMN payment_authority TEXT");
-    }
-    const hasPaymentRef = ordersColumns.some((col) => col.name === "payment_ref_id");
-    if (!hasPaymentRef) {
-        await run("ALTER TABLE orders ADD COLUMN payment_ref_id TEXT");
-    }
-    const hasPaymentStatus = ordersColumns.some((col) => col.name === "payment_status");
-    if (!hasPaymentStatus) {
-        await run("ALTER TABLE orders ADD COLUMN payment_status TEXT");
-    }
+    await run(`CREATE TABLE IF NOT EXISTS password_resets (
+        id VARCHAR(36) PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        code VARCHAR(32) NOT NULL,
+        expires_at DATETIME NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    await run(`CREATE TABLE IF NOT EXISTS categories (
+        id VARCHAR(36) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        slug VARCHAR(255) NOT NULL UNIQUE,
+        image_url TEXT NULL,
+        created_at DATETIME NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    await run(`CREATE TABLE IF NOT EXISTS products (
+        id VARCHAR(36) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255) NOT NULL UNIQUE,
+        description TEXT NULL,
+        price INT NOT NULL,
+        stock INT NOT NULL DEFAULT 0,
+        image_url TEXT NULL,
+        category_id VARCHAR(36) NOT NULL,
+        created_at DATETIME NOT NULL,
+        INDEX idx_products_category_id (category_id),
+        CONSTRAINT fk_products_category FOREIGN KEY (category_id) REFERENCES categories(id)
+            ON DELETE RESTRICT ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    await run(`CREATE TABLE IF NOT EXISTS addresses (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        recipient_name VARCHAR(255) NULL,
+        phone VARCHAR(64) NULL,
+        province VARCHAR(255) NULL,
+        city VARCHAR(255) NOT NULL,
+        address_line TEXT NOT NULL,
+        postal_code VARCHAR(64) NULL,
+        created_at DATETIME NOT NULL,
+        INDEX idx_addresses_user_id (user_id),
+        CONSTRAINT fk_addresses_user FOREIGN KEY (user_id) REFERENCES users(id)
+            ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    await run(`CREATE TABLE IF NOT EXISTS favorites (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        product_id VARCHAR(36) NOT NULL,
+        created_at DATETIME NOT NULL,
+        UNIQUE KEY uniq_favorites_user_product (user_id, product_id),
+        INDEX idx_favorites_user_id (user_id),
+        INDEX idx_favorites_product_id (product_id),
+        CONSTRAINT fk_favorites_user FOREIGN KEY (user_id) REFERENCES users(id)
+            ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT fk_favorites_product FOREIGN KEY (product_id) REFERENCES products(id)
+            ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    await run(`CREATE TABLE IF NOT EXISTS orders (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        status VARCHAR(64) NOT NULL,
+        total INT NOT NULL,
+        address_id VARCHAR(36) NULL,
+        shipping_address TEXT NULL,
+        tipax_tracking_code VARCHAR(255) NULL,
+        payment_provider VARCHAR(64) NULL,
+        payment_authority VARCHAR(255) NULL,
+        payment_ref_id VARCHAR(255) NULL,
+        payment_status VARCHAR(64) NULL,
+        created_at DATETIME NOT NULL,
+        INDEX idx_orders_user_id (user_id),
+        CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id)
+            ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    await run(`CREATE TABLE IF NOT EXISTS order_items (
+        id VARCHAR(36) PRIMARY KEY,
+        order_id VARCHAR(36) NOT NULL,
+        product_id VARCHAR(36) NOT NULL,
+        quantity INT NOT NULL,
+        price INT NOT NULL,
+        INDEX idx_order_items_order_id (order_id),
+        INDEX idx_order_items_product_id (product_id),
+        CONSTRAINT fk_order_items_order FOREIGN KEY (order_id) REFERENCES orders(id)
+            ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT fk_order_items_product FOREIGN KEY (product_id) REFERENCES products(id)
+            ON DELETE RESTRICT ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
     const breakfastCategory = await get("SELECT id FROM categories WHERE slug = 'breakfast'");
     const honeyCategory = await get("SELECT id FROM categories WHERE slug = 'honey'");
@@ -181,18 +175,15 @@ const initDb = async () => {
     }
 
     for (const category of categories) {
-        const exists = await get("SELECT id FROM categories WHERE slug = ?", [category.slug]);
-        if (!exists) {
-            await run(
-                "INSERT INTO categories (id, name, slug, image_url, created_at) VALUES (?, ?, ?, ?, ?)",
-                [randomUUID(), category.name, category.slug, category.imageUrl || null, new Date().toISOString()]
-            );
-        } else {
-            await run(
-                "UPDATE categories SET name = ?, image_url = COALESCE(?, image_url) WHERE slug = ?",
-                [category.name, category.imageUrl || null, category.slug]
-            );
-        }
+        const id = randomUUID();
+        await run(
+            `INSERT INTO categories (id, name, slug, image_url, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                 name = VALUES(name),
+                 image_url = COALESCE(VALUES(image_url), image_url)`,
+            [id, category.name, category.slug, category.imageUrl || null, new Date()]
+        );
     }
 
     for (const product of products) {
@@ -210,18 +201,18 @@ const initDb = async () => {
                 randomUUID(),
                 product.name,
                 product.slug,
-                product.description,
+                product.description || null,
                 product.price,
                 DEFAULT_STOCK,
-                product.imageUrl,
+                product.imageUrl || null,
                 category.id,
-                new Date().toISOString(),
+                new Date(),
             ]
         );
     }
 
-    // For now, treat inventory as 100 for all products (per current requirements).
     await run("UPDATE products SET stock = ?", [DEFAULT_STOCK]);
 };
 
-module.exports = {db, run, get, all, initDb};
+module.exports = {pool, run, get, all, initDb, withTransaction};
+

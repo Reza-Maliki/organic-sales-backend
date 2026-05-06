@@ -1,6 +1,6 @@
 const express = require("express");
 const {randomUUID} = require("crypto");
-const {all, get, run} = require("../db");
+const {all, get, run, withTransaction} = require("../db");
 const {requireAuth} = require("../middleware/auth");
 const {requestPayment} = require("../payments/zarinpal");
 
@@ -97,63 +97,64 @@ router.post("/", requireAuth, async (req, res) => {
     };
 
     // Final step: لحظه‌ای موجودی را چک کن و در صورت کافی بودن کم کن.
-    await run("BEGIN IMMEDIATE");
     try {
-        for (const line of prepared) {
-            const current = await get("SELECT stock FROM products WHERE id = ?", [line.productId]);
-            if (!current) {
-                throw Object.assign(new Error("invalid_product"), {code: "invalid_product"});
+        const result = await withTransaction(async (tx) => {
+            for (const line of prepared) {
+                const current = await tx.get("SELECT stock FROM products WHERE id = ?", [line.productId]);
+                if (!current) {
+                    throw Object.assign(new Error("invalid_product"), {code: "invalid_product"});
+                }
+                const available = Number(current.stock || 0);
+                if (available < line.quantity) {
+                    throw Object.assign(new Error("insufficient_stock"), {
+                        code: "insufficient_stock",
+                        productId: line.productId,
+                        available,
+                        requested: line.quantity,
+                    });
+                }
+                await tx.run("UPDATE products SET stock = stock - ? WHERE id = ?", [line.quantity, line.productId]);
             }
-            const available = Number(current.stock || 0);
-            if (available < line.quantity) {
-                throw Object.assign(new Error("insufficient_stock"), {
-                    code: "insufficient_stock",
-                    productId: line.productId,
-                    available,
-                    requested: line.quantity,
-                });
-            }
-            await run("UPDATE products SET stock = stock - ? WHERE id = ?", [line.quantity, line.productId]);
-        }
 
-        await run(
-            `INSERT INTO orders
-             (id, user_id, status, total, address_id, shipping_address, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [orderId, req.user.sub, "pending", total, addressId, JSON.stringify(shippingAddress), createdAt]
-        );
-
-        for (const line of prepared) {
-            await run(
-                "INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES (?, ?, ?, ?, ?)",
-                [randomUUID(), orderId, line.productId, line.quantity, line.price]
+            await tx.run(
+                `INSERT INTO orders
+                 (id, user_id, status, total, address_id, shipping_address, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [orderId, req.user.sub, "pending", total, addressId, JSON.stringify(shippingAddress), createdAt]
             );
-        }
 
-        const merchantId =
-            process.env.ZARINPAL_MERCHANT_ID ||
-            // sandbox allows any UUID
-            randomUUID();
-        const callbackUrl = `${getBackendBaseUrl(req)}/payments/zarinpal/callback?orderId=${encodeURIComponent(orderId)}`;
-        const description = `Order ${orderId}`;
-        const {authority, paymentUrl} = await requestPayment({
-            merchantId,
-            amount: Number(total),
-            currency: "IRT",
-            callbackUrl,
-            description,
-            metadata: {order_id: orderId},
+            for (const line of prepared) {
+                await tx.run(
+                    "INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES (?, ?, ?, ?, ?)",
+                    [randomUUID(), orderId, line.productId, line.quantity, line.price]
+                );
+            }
+
+            const merchantId =
+                process.env.ZARINPAL_MERCHANT_ID ||
+                // sandbox allows any UUID
+                randomUUID();
+            const callbackUrl = `${getBackendBaseUrl(req)}/payments/zarinpal/callback?orderId=${encodeURIComponent(orderId)}`;
+            const description = `Order ${orderId}`;
+            const {authority, paymentUrl} = await requestPayment({
+                merchantId,
+                amount: Number(total),
+                currency: "IRT",
+                callbackUrl,
+                description,
+                metadata: {order_id: orderId},
+            });
+
+            await tx.run(
+                "UPDATE orders SET payment_provider = ?, payment_authority = ?, payment_status = ?, status = ? WHERE id = ?",
+                ["zarinpal", authority, "pending", "payment_pending", orderId]
+            );
+
+            return {authority, paymentUrl};
         });
 
-        await run(
-            "UPDATE orders SET payment_provider = ?, payment_authority = ?, payment_status = ?, status = ? WHERE id = ?",
-            ["zarinpal", authority, "pending", "payment_pending", orderId]
-        );
-
-        await run("COMMIT");
-        return res.json({id: orderId, total, paymentUrl, authority});
+        return res.json({id: orderId, total, paymentUrl: result.paymentUrl, authority: result.authority});
     } catch (error) {
-        await run("ROLLBACK");
         if (error?.code === "insufficient_stock") {
             return res.status(409).json({
                 error: "insufficient_stock",
